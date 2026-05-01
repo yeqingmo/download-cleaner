@@ -2,21 +2,22 @@
 
 主流程是一个轻量 Rust 守护进程：平时没有网页和窗口，只有检测到 `~/Downloads` 出现新下载且文件稳定后，才通过 macOS 原生 `osascript` 弹窗询问归档位置。
 
-Node 版本只保留为临时管理面板/原型，不再作为默认主入口。
+同一来源在短时间多文件下载时，会聚合批处理弹窗；默认聚合窗口是 `5s`。
 
-## 安装 Rust
+## 代码结构
 
-当前机器还没有 `rustc` 和 `cargo`。装好后重新打开终端或执行对应的环境加载命令：
+当前源码已经按职责拆分：
 
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-也可以用 Homebrew：
-
-```bash
-brew install rust
-```
+- `src/main.rs`：入口分发（`daemon` / `panel`）。
+- `src/daemon.rs`：监听、去抖、批处理分组与流程编排。
+- `src/ui.rs`：AppleScript 弹窗、目录选择、轻量摘要面板。
+- `src/gui_panel.rs`：Rust 原生管理面板。
+- `src/file_ops.rs`：稳定性判断、移动文件、跨卷处理、忽略规则。
+- `src/metadata.rs`：xattr + plist 解析下载来源域名。
+- `src/memory.rs`：记忆库读写、建议目标、摘要。
+- `src/config.rs`：环境变量与默认配置。
+- `src/pathing.rs`：路径与通用工具函数。
+- `src/types.rs`：共享数据结构。
 
 ## 编译
 
@@ -90,18 +91,33 @@ launchctl unload ~/Library/LaunchAgents/com.yy.download-cleaner.plist
 DOWNLOADS_DIR="$HOME/Downloads" ./target/release/download-cleaner
 MEMORY_PATH="$HOME/.config/smart_dl_memory.json" ./target/release/download-cleaner
 COMPLETE_DELAY_MS=1500 ./target/release/download-cleaner
+BATCH_WINDOW_MS=5000 ./target/release/download-cleaner
 ```
 
-## 可选管理面板
+## 原生管理面板（无 Node）
 
-如果只是想临时看一眼 Downloads 和记忆库，可以运行旧的 Node 面板：
+Rust 二进制默认管理器是原生 GUI（Rust）：
 
 ```bash
-npm run panel
+./target/release/download-cleaner panel
 ```
 
-然后访问：
+可用于：
 
-```text
-http://127.0.0.1:4173
+- 列出当前 Downloads 文件（来源域名 + 建议目录）。
+- 首页直接点击交互（不再进入二级操作面板）。
+- `移动到建议目录`、`选择其他目录`、`放着不管`。
+- `删除到废纸篓`（不依赖 Finder 删除）。
+- 列表行使用交替底色区分相邻文件。
+
+如果你想用 AppleScript 列表版管理器，也保留了：
+
+```bash
+./target/release/download-cleaner panel-script
+```
+
+如果你只想看轻量摘要菜单，也保留了：
+
+```bash
+./target/release/download-cleaner panel-summary
 ```
