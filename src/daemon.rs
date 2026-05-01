@@ -6,11 +6,22 @@ use crate::types::{AppConfig, BatchChoice, FileSignature, ReadyDownload, UserCho
 use crate::ui::{choose_batch_folder, choose_folder, prompt_batch_user, prompt_user};
 use anyhow::{anyhow, Context, Result};
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+const PROCESSED_TTL: Duration = Duration::from_secs(60 * 60);
+const PROCESSED_MAX: usize = 20_000;
+const PROCESSED_PRUNE_TO: usize = 10_000;
+const SINGLE_GROUP_GRACE: Duration = Duration::from_millis(800);
+
+struct DomainQueue {
+    downloads: Vec<ReadyDownload>,
+    deadline: Instant,
+    batching: bool,
+}
 
 enum HandleOutcome {
     Done,
@@ -27,10 +38,9 @@ pub fn run(config: AppConfig) -> Result<()> {
     )?;
 
     let mut pending = HashMap::<PathBuf, Instant>::new();
-    let mut ready = Vec::<ReadyDownload>::new();
-    let mut batch_deadline = None::<Instant>;
+    let mut domain_queues = HashMap::<String, DomainQueue>::new();
     let mut known = snapshot_existing_files(&config, &mut pending)?;
-    let mut processed = HashSet::new();
+    let mut processed = HashMap::<FileSignature, Instant>::new();
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
     let mut watcher = RecommendedWatcher::new(
         move |event| {
@@ -54,7 +64,7 @@ pub fn run(config: AppConfig) -> Result<()> {
     });
 
     loop {
-        let timeout = next_timeout(&pending, batch_deadline).unwrap_or(Duration::from_secs(1));
+        let timeout = next_timeout(&pending, &domain_queues).unwrap_or(Duration::from_secs(1));
 
         match rx.recv_timeout(timeout) {
             Ok(Ok(event)) => schedule_event_paths(event, &config, &mut pending),
@@ -63,16 +73,12 @@ pub fn run(config: AppConfig) -> Result<()> {
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err(anyhow!("文件监听通道已断开")),
         }
 
+        prune_processed(&mut processed);
         let newly_ready = drain_due_paths(&config, &mut known, &mut processed, &mut pending);
         if !newly_ready.is_empty() {
-            ready.extend(newly_ready);
-            batch_deadline.get_or_insert_with(|| Instant::now() + config.batch_window);
+            enqueue_ready_downloads(&config, &mut domain_queues, newly_ready);
         }
-
-        if batch_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            process_ready_downloads(&config, &mut ready);
-            batch_deadline = None;
-        }
+        process_due_queues(&config, &mut domain_queues);
     }
 }
 
@@ -94,6 +100,14 @@ fn snapshot_existing_files(
         let path = entry.path();
         if should_ignore_path(&path) {
             continue;
+        }
+        match is_regular_file_path(&path) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => {
+                log(&format!("检查文件类型失败: {}: {error}", path.display()));
+                continue;
+            }
         }
         match file_signature(&path) {
             Ok(signature) => {
@@ -121,13 +135,14 @@ fn schedule_event_paths(event: Event, config: &AppConfig, pending: &mut HashMap<
 fn drain_due_paths(
     config: &AppConfig,
     known: &mut HashSet<FileSignature>,
-    processed: &mut HashSet<FileSignature>,
+    processed: &mut HashMap<FileSignature, Instant>,
     pending: &mut HashMap<PathBuf, Instant>,
 ) -> Vec<ReadyDownload> {
     let now = Instant::now();
     let mut due_paths: Vec<PathBuf> = pending
         .iter()
-        .filter_map(|(path, due)| (*due <= now).then(|| path.clone()))
+        .filter(|(_, due)| **due <= now)
+        .map(|(path, _)| path.clone())
         .collect();
     due_paths.sort();
     let mut ready = Vec::new();
@@ -150,10 +165,13 @@ fn drain_due_paths(
 fn prepare_ready_download(
     config: &AppConfig,
     known: &mut HashSet<FileSignature>,
-    processed: &mut HashSet<FileSignature>,
+    processed: &mut HashMap<FileSignature, Instant>,
     path: &Path,
 ) -> Result<HandleOutcome> {
     if should_ignore_path(path) || !path.exists() {
+        return Ok(HandleOutcome::Done);
+    }
+    if !is_regular_file_path(path)? {
         return Ok(HandleOutcome::Done);
     }
     if !is_stable(path, config.complete_delay)? {
@@ -163,11 +181,11 @@ fn prepare_ready_download(
     if known.contains(&signature) && !config.scan_existing {
         return Ok(HandleOutcome::Done);
     }
-    if processed.contains(&signature) {
+    if processed.contains_key(&signature) {
         return Ok(HandleOutcome::Done);
     }
 
-    processed.insert(signature);
+    processed.insert(signature.clone(), Instant::now());
     let file_name = file_name(path);
     let domain = extract_source_domain(path).unwrap_or_else(|error| {
         log(&format!("读取来源失败: {}: {error}", path.display()));
@@ -177,33 +195,64 @@ fn prepare_ready_download(
         path: path.to_path_buf(),
         file_name,
         domain,
-        modified_ms: file_signature(path)?.modified_ms,
+        modified_ms: signature.modified_ms,
     }))
 }
 
-fn process_ready_downloads(config: &AppConfig, ready: &mut Vec<ReadyDownload>) {
-    if ready.is_empty() {
+fn enqueue_ready_downloads(
+    config: &AppConfig,
+    queues: &mut HashMap<String, DomainQueue>,
+    downloads: Vec<ReadyDownload>,
+) {
+    let now = Instant::now();
+    for download in downloads {
+        let key = batch_key(&download);
+        if let Some(queue) = queues.get_mut(&key) {
+            queue.downloads.push(download);
+            if !queue.batching && queue.downloads.len() >= 2 {
+                queue.batching = true;
+                queue.deadline = now + config.batch_window;
+            }
+        } else {
+            queues.insert(
+                key,
+                DomainQueue {
+                    downloads: vec![download],
+                    deadline: now + SINGLE_GROUP_GRACE,
+                    batching: false,
+                },
+            );
+        }
+    }
+}
+
+fn process_due_queues(config: &AppConfig, queues: &mut HashMap<String, DomainQueue>) {
+    if queues.is_empty() {
         return;
     }
-    ready.sort_by(|left, right| {
-        left.domain
-            .cmp(&right.domain)
-            .then(left.modified_ms.cmp(&right.modified_ms))
-            .then(left.file_name.cmp(&right.file_name))
-    });
 
-    let mut groups = BTreeMap::<String, Vec<ReadyDownload>>::new();
-    for download in ready.drain(..) {
-        groups
-            .entry(batch_key(&download))
-            .or_default()
-            .push(download);
-    }
+    let now = Instant::now();
+    let mut due_keys: Vec<String> = queues
+        .iter()
+        .filter(|(_key, queue)| queue.deadline <= now)
+        .map(|(key, _queue)| key.clone())
+        .collect();
+    due_keys.sort();
 
-    for (_key, downloads) in groups {
-        let result = if downloads.len() > 1 {
-            handle_batch_downloads(config, downloads)
-        } else if let Some(download) = downloads.into_iter().next() {
+    for key in due_keys {
+        let Some(mut queue) = queues.remove(&key) else {
+            continue;
+        };
+
+        queue.downloads.sort_by(|left, right| {
+            left.modified_ms
+                .cmp(&right.modified_ms)
+                .then(left.file_name.cmp(&right.file_name))
+        });
+
+        let result = if queue.downloads.len() > 1 {
+            handle_batch_downloads(config, queue.downloads)
+        } else if let Some(download) = queue.downloads.into_iter().next() {
             handle_single_download(config, download)
         } else {
             Ok(())
@@ -290,19 +339,43 @@ fn move_batch_and_remember(
 
 fn next_timeout(
     pending: &HashMap<PathBuf, Instant>,
-    batch_deadline: Option<Instant>,
+    queues: &HashMap<String, DomainQueue>,
 ) -> Option<Duration> {
     let now = Instant::now();
     let pending_timeout = pending
         .values()
         .min()
         .map(|deadline| deadline.saturating_duration_since(now));
-    let batch_timeout = batch_deadline.map(|deadline| deadline.saturating_duration_since(now));
+    let queue_timeout = queues
+        .values()
+        .map(|queue| queue.deadline.saturating_duration_since(now))
+        .min();
 
-    match (pending_timeout, batch_timeout) {
+    match (pending_timeout, queue_timeout) {
         (Some(left), Some(right)) => Some(left.min(right)),
         (Some(left), None) => Some(left),
         (None, Some(right)) => Some(right),
         (None, None) => None,
     }
+}
+
+fn prune_processed(processed: &mut HashMap<FileSignature, Instant>) {
+    let now = Instant::now();
+    processed.retain(|_signature, inserted_at| now.duration_since(*inserted_at) <= PROCESSED_TTL);
+
+    if processed.len() <= PROCESSED_MAX {
+        return;
+    }
+
+    let mut entries: Vec<(FileSignature, Instant)> =
+        processed.iter().map(|(signature, ts)| (signature.clone(), *ts)).collect();
+    entries.sort_by_key(|(_signature, ts)| *ts);
+    let remove_count = entries.len().saturating_sub(PROCESSED_PRUNE_TO);
+    for (signature, _ts) in entries.into_iter().take(remove_count) {
+        processed.remove(&signature);
+    }
+}
+
+fn is_regular_file_path(path: &Path) -> Result<bool> {
+    Ok(fs::symlink_metadata(path)?.file_type().is_file())
 }

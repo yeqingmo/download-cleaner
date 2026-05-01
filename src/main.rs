@@ -1,7 +1,8 @@
 mod config;
 mod daemon;
 mod file_ops;
-mod gui_panel;
+mod gui_panel_slint;
+mod launch_agent;
 mod manager;
 mod memory;
 mod metadata;
@@ -17,8 +18,8 @@ fn main() -> Result<()> {
     let config = AppConfig::from_env()?;
     let mode = env::args().nth(1);
 
-    if matches!(mode.as_deref(), Some("panel")) {
-        gui_panel::run_gui(&config)
+    if matches!(mode.as_deref(), Some("panel")) || matches!(mode.as_deref(), Some("panel-slint")) {
+        gui_panel_slint::run_gui(&config)
     } else if matches!(mode.as_deref(), Some("panel-script")) {
         manager::run_manager(&config)
     } else if matches!(mode.as_deref(), Some("panel-summary")) {

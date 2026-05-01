@@ -6,7 +6,7 @@ use crate::types::AppConfig;
 use crate::ui::{choose_folder, run_osascript_script_with_args};
 use anyhow::{anyhow, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -24,6 +24,7 @@ enum EntryAction {
     Ignore(usize),
     DeleteTrash(usize),
     RevealInFinder(usize),
+    ExitManager,
 }
 
 pub fn run_manager(config: &AppConfig) -> Result<()> {
@@ -40,7 +41,8 @@ pub fn run_manager(config: &AppConfig) -> Result<()> {
                 "打开记忆库文件" => {
                     let _ = Command::new("open").arg(&config.memory_path).status();
                 }
-                _ => return Ok(()),
+                "保持运行" => {}
+                _ => {}
             }
             continue;
         }
@@ -49,7 +51,7 @@ pub fn run_manager(config: &AppConfig) -> Result<()> {
         let (labels, actions) = build_action_entries(&items);
         let picked = choose_action_entry(&labels)?;
         let Some(picked_label) = picked else {
-            return Ok(());
+            continue;
         };
 
         let idx = labels
@@ -61,7 +63,9 @@ pub fn run_manager(config: &AppConfig) -> Result<()> {
             .cloned()
             .ok_or_else(|| anyhow!("动作索引越界"))?;
 
-        execute_action(config, &items, action)?;
+        if execute_action(config, &items, action)? {
+            return Ok(());
+        }
     }
 }
 
@@ -131,6 +135,9 @@ fn build_action_entries(items: &[ManageItem]) -> (Vec<String>, Vec<EntryAction>)
         actions.push(EntryAction::RevealInFinder(idx));
     }
 
+    labels.push("退出管理器".to_string());
+    actions.push(EntryAction::ExitManager);
+
     (labels, actions)
 }
 
@@ -150,7 +157,7 @@ end run"#;
     }
 }
 
-fn execute_action(config: &AppConfig, items: &[ManageItem], action: EntryAction) -> Result<()> {
+fn execute_action(config: &AppConfig, items: &[ManageItem], action: EntryAction) -> Result<bool> {
     match action {
         EntryAction::MoveSuggested(index) => {
             let item = items.get(index).ok_or_else(|| anyhow!("索引越界"))?;
@@ -160,32 +167,36 @@ fn execute_action(config: &AppConfig, items: &[ManageItem], action: EntryAction)
                 let target = choose_folder(&item.file_name)?;
                 move_and_remember(config, &item.path, &item.domain, &target)?;
             }
+            Ok(false)
         }
         EntryAction::ChooseOther(index) => {
             let item = items.get(index).ok_or_else(|| anyhow!("索引越界"))?;
             let target = choose_folder(&item.file_name)?;
             move_and_remember(config, &item.path, &item.domain, &target)?;
+            Ok(false)
         }
-        EntryAction::Ignore(_index) => {}
+        EntryAction::Ignore(_index) => Ok(false),
         EntryAction::DeleteTrash(index) => {
             let item = items.get(index).ok_or_else(|| anyhow!("索引越界"))?;
             trash_path(&item.path)?;
+            Ok(false)
         }
         EntryAction::RevealInFinder(index) => {
             let item = items.get(index).ok_or_else(|| anyhow!("索引越界"))?;
             let _ = Command::new("open").arg("-R").arg(&item.path).status();
+            Ok(false)
         }
+        EntryAction::ExitManager => Ok(true),
     }
-    Ok(())
 }
 
-fn empty_state_action(memory_path: &PathBuf) -> Result<String> {
+fn empty_state_action(memory_path: &Path) -> Result<String> {
     let script = r#"use scripting additions
 on run argv
 set m to item 1 of argv
 set msg to "当前没有可管理的下载文件。" & return & "记忆库: " & m
-set picked to choose from list {"打开下载文件夹", "打开记忆库文件", "退出"} with title "Download Cleaner 管理" with prompt msg OK button name "执行" cancel button name "退出"
-if picked is false then return "退出"
+    set picked to choose from list {"打开下载文件夹", "打开记忆库文件", "保持运行"} with title "Download Cleaner 管理" with prompt msg OK button name "执行" cancel button name "保持运行"
+    if picked is false then return "保持运行"
 return item 1 of picked
 end run"#;
     run_osascript_script_with_args(script, &[&memory_path.to_string_lossy()])

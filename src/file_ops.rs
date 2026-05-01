@@ -1,7 +1,7 @@
-use crate::memory::{read_memory, write_memory};
+use crate::memory::update_memory;
 use crate::pathing::{expand_home, file_name, home_dir, log, same_path};
 use crate::types::{AppConfig, FileSignature};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,6 +41,7 @@ pub fn move_and_remember(
     domain: &str,
     target_dir: &Path,
 ) -> Result<()> {
+    ensure_regular_file(path)?;
     let target_dir = expand_home(target_dir.to_path_buf())?;
 
     if same_path(&target_dir, &config.downloads_dir) {
@@ -58,14 +59,14 @@ pub fn move_and_remember(
     move_path(path, &destination)
         .with_context(|| format!("移动失败: {} -> {}", path.display(), destination.display()))?;
 
-    let mut memory = read_memory(&config.memory_path)?;
     let target = target_dir.to_string_lossy().to_string();
-    *memory
-        .entry(domain.to_string())
-        .or_default()
-        .entry(target)
-        .or_default() += 1;
-    write_memory(&config.memory_path, &memory)?;
+    update_memory(&config.memory_path, |memory| {
+        *memory
+            .entry(domain.to_string())
+            .or_default()
+            .entry(target)
+            .or_default() += 1;
+    })?;
 
     log(&format!(
         "已移动: {} -> {}",
@@ -76,6 +77,7 @@ pub fn move_and_remember(
 }
 
 pub fn trash_path(path: &Path) -> Result<()> {
+    ensure_regular_file(path)?;
     let trash_dir = home_dir()?.join(".Trash");
     fs::create_dir_all(&trash_dir)?;
     let destination = unique_destination(&trash_dir, &file_name(path));
@@ -96,6 +98,18 @@ fn modified_ms(metadata: &fs::Metadata) -> Result<u128> {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis())
+}
+
+fn ensure_regular_file(path: &Path) -> Result<()> {
+    let metadata =
+        fs::symlink_metadata(path).with_context(|| format!("无法读取文件元数据: {}", path.display()))?;
+    if metadata.file_type().is_file() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "仅支持处理普通文件，拒绝路径: {}",
+        path.display()
+    ))
 }
 
 fn unique_destination(target_dir: &Path, file_name: &str) -> PathBuf {

@@ -1,123 +1,116 @@
 # Download Cleaner
 
-主流程是一个轻量 Rust 守护进程：平时没有网页和窗口，只有检测到 `~/Downloads` 出现新下载且文件稳定后，才通过 macOS 原生 `osascript` 弹窗询问归档位置。
+Download Cleaner 是一个轻量级 macOS 下载整理工具。
 
-同一来源在短时间多文件下载时，会聚合批处理弹窗；默认聚合窗口是 `5s`。
+它会：
+- 监控 `~/Downloads`
+- 识别新下载的来源域名
+- 根据历史习惯推荐归档目录
+- 支持单文件处理和同源批量处理
+- 提供后台监控 daemon 和可视化管理面板
 
-## 代码结构
+## 特性
 
-当前源码已经按职责拆分：
+- 新下载稳定后自动弹窗
+- 同一来源短时间内连续下载可自动聚合
+- 关闭窗口不影响后台监控
+- 支持停止 / 重启监控
+- 面板支持排序、多选、Shift 连选
+- 支持移动到建议目录、选择目录、删除到废纸篓
+- 轻量化，daemon内存占用仅2 Mb
 
-- `src/main.rs`：入口分发（`daemon` / `panel`）。
-- `src/daemon.rs`：监听、去抖、批处理分组与流程编排。
-- `src/ui.rs`：AppleScript 弹窗、目录选择、轻量摘要面板。
-- `src/gui_panel.rs`：Rust 原生管理面板。
-- `src/file_ops.rs`：稳定性判断、移动文件、跨卷处理、忽略规则。
-- `src/metadata.rs`：xattr + plist 解析下载来源域名。
-- `src/memory.rs`：记忆库读写、建议目标、摘要。
-- `src/config.rs`：环境变量与默认配置。
-- `src/pathing.rs`：路径与通用工具函数。
-- `src/types.rs`：共享数据结构。
+## 工作方式
 
-## 编译
+程序分两部分：
+
+- 后台 daemon：负责监听 Downloads、识别文件、弹出整理流程
+- 管理面板：负责查看文件、批量操作、控制监控状态
+
+## 安装
+
+1. 下载 DMG
+2. 拖动 `Download Cleaner.app` 到 `Applications`
+3. 首次打开会自动安装后台监控
+
+## 使用
+
+### 常规使用
+
+直接打开应用即可，关闭GUI后不影响daemon。
+
+### 管理面板
 
 ```bash
-cargo build --release
+cargo run -- panel
 ```
 
-产物在：
+也可用别名：
+
+```bash
+cargo run -- panel-slint
+```
+
+### 命令行模式
+
+- `panel-script`：AppleScript 版管理器
+- `panel-summary`：轻量摘要面板
+
+## 监控行为
+
+- 单文件会优先快速弹窗
+- 同一来源持续到来时，会进入批处理弹窗
+- 关闭面板不会停止后台监控
+- 你可以在面板里手动停止 / 重启监控
+
+## 配置
+
+环境变量：
+
+```bash
+DOWNLOADS_DIR="$HOME/Downloads"
+MEMORY_PATH="$HOME/.config/smart_dl_memory.json"
+COMPLETE_DELAY_MS=500
+BATCH_WINDOW_MS=10000
+SCAN_EXISTING=1
+```
+
+## 打包
+
+```bash
+./scripts/package_macos.sh
+```
+
+产物：
+
+- `dist/Download Cleaner.app`
+- `dist/Download Cleaner.dmg`
+
+## 图标
+
+放置自定义图标文件：
 
 ```text
-target/release/download-cleaner
+assets/macos/AppIcon.icns
 ```
 
-## 运行
+然后重新打包即可。
+
+## 卸载
 
 ```bash
-./target/release/download-cleaner
+launchctl bootout gui/$UID/com.yy.download-cleaner
+rm ~/Library/LaunchAgents/com.yy.download-cleaner.plist
 ```
 
-默认只监听启动后的新下载，不会把 Downloads 里已有文件挨个弹一遍。调试时如果想处理现有文件：
+## 目录结构
 
-```bash
-SCAN_EXISTING=1 ./target/release/download-cleaner
-```
-
-## 弹窗行为
-
-检测到新下载后会弹出系统对话框：
-
-- 有历史建议：`移动到 [目录名]`、`放着不管`、`选择其他...`
-- 没有历史建议：`选择其他...`、`放着不管`
-
-`选择其他...` 会打开 macOS 原生文件夹选择器。移动成功后会更新：
-
-```text
-~/.config/smart_dl_memory.json
-```
-
-## launchd 自启动
-
-模板在：
-
-```text
-launchd/com.yy.download-cleaner.plist
-```
-
-安装：
-
-```bash
-mkdir -p ~/Library/LaunchAgents
-cp launchd/com.yy.download-cleaner.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.yy.download-cleaner.plist
-```
-
-停止：
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.yy.download-cleaner.plist
-```
-
-日志：
-
-```text
-/tmp/download-cleaner.out.log
-/tmp/download-cleaner.err.log
-```
-
-## 环境变量
-
-```bash
-DOWNLOADS_DIR="$HOME/Downloads" ./target/release/download-cleaner
-MEMORY_PATH="$HOME/.config/smart_dl_memory.json" ./target/release/download-cleaner
-COMPLETE_DELAY_MS=1500 ./target/release/download-cleaner
-BATCH_WINDOW_MS=5000 ./target/release/download-cleaner
-```
-
-## 原生管理面板（无 Node）
-
-Rust 二进制默认管理器是原生 GUI（Rust）：
-
-```bash
-./target/release/download-cleaner panel
-```
-
-可用于：
-
-- 列出当前 Downloads 文件（来源域名 + 建议目录）。
-- 首页直接点击交互（不再进入二级操作面板）。
-- `移动到建议目录`、`选择其他目录`、`放着不管`。
-- `删除到废纸篓`（不依赖 Finder 删除）。
-- 列表行使用交替底色区分相邻文件。
-
-如果你想用 AppleScript 列表版管理器，也保留了：
-
-```bash
-./target/release/download-cleaner panel-script
-```
-
-如果你只想看轻量摘要菜单，也保留了：
-
-```bash
-./target/release/download-cleaner panel-summary
-```
+- `src/main.rs`：入口分发
+- `src/daemon.rs`：监听与批处理
+- `src/ui.rs`：系统弹窗
+- `src/gui_panel_slint.rs`：管理面板
+- `src/file_ops.rs`：移动 / 删除 / 稳定性判断
+- `src/metadata.rs`：来源域名解析
+- `src/memory.rs`：记忆库
+- `src/config.rs`：环境变量
+- `src/pathing.rs`：路径工具
+- `src/types.rs`：共享数据结构
