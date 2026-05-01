@@ -46,6 +46,7 @@ pub fn run(config: AppConfig) -> Result<()> {
     let mut pending = HashMap::<PathBuf, PendingEntry>::new();
     let mut domain_queues = HashMap::<String, DomainQueue>::new();
     let mut known = snapshot_existing_files(&config, &mut pending)?;
+    known.shrink_to_fit();
     let mut processed = HashMap::<FileSignature, Instant>::new();
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
     let mut watcher = RecommendedWatcher::new(
@@ -85,6 +86,9 @@ pub fn run(config: AppConfig) -> Result<()> {
             enqueue_ready_downloads(&config, &mut domain_queues, newly_ready);
         }
         process_due_queues(&config, &mut domain_queues);
+        compact_pending(&mut pending);
+        compact_domain_queues(&mut domain_queues);
+        compact_processed(&mut processed);
     }
 }
 
@@ -401,6 +405,28 @@ fn prune_processed(processed: &mut HashMap<FileSignature, Instant>) {
     let remove_count = entries.len().saturating_sub(PROCESSED_PRUNE_TO);
     for (signature, _ts) in entries.into_iter().take(remove_count) {
         processed.remove(&signature);
+    }
+}
+
+fn compact_processed(processed: &mut HashMap<FileSignature, Instant>) {
+    if processed.is_empty() {
+        processed.shrink_to_fit();
+        return;
+    }
+    if processed.capacity() > PROCESSED_MAX * 2 && processed.len() <= PROCESSED_PRUNE_TO {
+        processed.shrink_to_fit();
+    }
+}
+
+fn compact_pending(pending: &mut HashMap<PathBuf, PendingEntry>) {
+    if pending.is_empty() {
+        pending.shrink_to_fit();
+    }
+}
+
+fn compact_domain_queues(queues: &mut HashMap<String, DomainQueue>) {
+    if queues.is_empty() {
+        queues.shrink_to_fit();
     }
 }
 

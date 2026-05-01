@@ -1,6 +1,8 @@
 # Download Cleaner
 
-Download Cleaner 是一个轻量级 macOS 下载整理工具。
+## About
+
+Download Cleaner 是一个 macOS 原生的下载整理工具。它常驻监听 `~/Downloads`，根据来源域名和历史习惯给出整理建议，在新下载稳定后弹出原生提示，并提供后台 daemon + 可视化面板两套入口，适合高频下载场景下快速归档、批量移动和删除。
 
 它会：
 - 监控 `~/Downloads`
