@@ -1,5 +1,9 @@
 # Download Cleaner
 
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/dedfbc8a-7372-4e8c-be03-1b1eb9da49cb" autoplay loop muted playsinline width="800"></video>
+</p>
+
 English | [中文文档](./README.zh-CN.md)
 
 ## About
