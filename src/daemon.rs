@@ -16,11 +16,17 @@ const PROCESSED_TTL: Duration = Duration::from_secs(60 * 60);
 const PROCESSED_MAX: usize = 20_000;
 const PROCESSED_PRUNE_TO: usize = 10_000;
 const SINGLE_GROUP_GRACE: Duration = Duration::from_millis(800);
+const PENDING_MAX_WAIT: Duration = Duration::from_secs(20);
 
 struct DomainQueue {
     downloads: Vec<ReadyDownload>,
     deadline: Instant,
     batching: bool,
+}
+
+struct PendingEntry {
+    due: Instant,
+    first_seen: Instant,
 }
 
 enum HandleOutcome {
@@ -37,7 +43,7 @@ pub fn run(config: AppConfig) -> Result<()> {
             .ok_or_else(|| anyhow!("记忆库路径没有父目录: {}", config.memory_path.display()))?,
     )?;
 
-    let mut pending = HashMap::<PathBuf, Instant>::new();
+    let mut pending = HashMap::<PathBuf, PendingEntry>::new();
     let mut domain_queues = HashMap::<String, DomainQueue>::new();
     let mut known = snapshot_existing_files(&config, &mut pending)?;
     let mut processed = HashMap::<FileSignature, Instant>::new();
@@ -84,9 +90,10 @@ pub fn run(config: AppConfig) -> Result<()> {
 
 fn snapshot_existing_files(
     config: &AppConfig,
-    pending: &mut HashMap<PathBuf, Instant>,
+    pending: &mut HashMap<PathBuf, PendingEntry>,
 ) -> Result<HashSet<FileSignature>> {
     let mut known = HashSet::new();
+    let now = Instant::now();
     for entry in fs::read_dir(&config.downloads_dir)
         .with_context(|| format!("无法读取 Downloads: {}", config.downloads_dir.display()))?
     {
@@ -112,7 +119,10 @@ fn snapshot_existing_files(
         match file_signature(&path) {
             Ok(signature) => {
                 if config.scan_existing {
-                    pending.insert(path, Instant::now() + config.complete_delay);
+                    pending.insert(path, PendingEntry {
+                        due: now + config.complete_delay,
+                        first_seen: now,
+                    });
                 } else {
                     known.insert(signature);
                 }
@@ -123,12 +133,21 @@ fn snapshot_existing_files(
     Ok(known)
 }
 
-fn schedule_event_paths(event: Event, config: &AppConfig, pending: &mut HashMap<PathBuf, Instant>) {
+fn schedule_event_paths(event: Event, config: &AppConfig, pending: &mut HashMap<PathBuf, PendingEntry>) {
     for path in event.paths {
         if !is_inside_dir(&path, &config.downloads_dir) || should_ignore_path(&path) {
             continue;
         }
-        pending.insert(path, Instant::now() + config.complete_delay);
+        let now = Instant::now();
+        pending
+            .entry(path)
+            .and_modify(|entry| {
+                entry.due = now + config.complete_delay;
+            })
+            .or_insert(PendingEntry {
+                due: now + config.complete_delay,
+                first_seen: now,
+            });
     }
 }
 
@@ -136,23 +155,32 @@ fn drain_due_paths(
     config: &AppConfig,
     known: &mut HashSet<FileSignature>,
     processed: &mut HashMap<FileSignature, Instant>,
-    pending: &mut HashMap<PathBuf, Instant>,
+    pending: &mut HashMap<PathBuf, PendingEntry>,
 ) -> Vec<ReadyDownload> {
     let now = Instant::now();
     let mut due_paths: Vec<PathBuf> = pending
         .iter()
-        .filter(|(_, due)| **due <= now)
+        .filter(|(_, entry)| entry.due <= now)
         .map(|(path, _)| path.clone())
         .collect();
     due_paths.sort();
     let mut ready = Vec::new();
 
     for path in due_paths {
-        pending.remove(&path);
-        match prepare_ready_download(config, known, processed, &path) {
+        let Some(entry) = pending.remove(&path) else {
+            continue;
+        };
+        match prepare_ready_download(config, known, processed, &path, entry.first_seen) {
             Ok(HandleOutcome::Done) => {}
             Ok(HandleOutcome::RetryLater) => {
-                pending.insert(path, Instant::now() + config.complete_delay);
+                let now = Instant::now();
+                pending.insert(
+                    path,
+                    PendingEntry {
+                        due: now + config.complete_delay,
+                        first_seen: entry.first_seen,
+                    },
+                );
             }
             Ok(HandleOutcome::Ready(download)) => ready.push(download),
             Err(error) => log(&format!("处理失败: {}: {error:#}", path.display())),
@@ -167,6 +195,7 @@ fn prepare_ready_download(
     known: &mut HashSet<FileSignature>,
     processed: &mut HashMap<FileSignature, Instant>,
     path: &Path,
+    first_seen: Instant,
 ) -> Result<HandleOutcome> {
     if should_ignore_path(path) || !path.exists() {
         return Ok(HandleOutcome::Done);
@@ -175,7 +204,14 @@ fn prepare_ready_download(
         return Ok(HandleOutcome::Done);
     }
     if !is_stable(path, config.complete_delay)? {
-        return Ok(HandleOutcome::RetryLater);
+        if Instant::now().duration_since(first_seen) >= PENDING_MAX_WAIT {
+            log(&format!(
+                "文件稳定等待超时，强制处理: {}",
+                path.display()
+            ));
+        } else {
+            return Ok(HandleOutcome::RetryLater);
+        }
     }
     let signature = file_signature(path)?;
     if known.contains(&signature) && !config.scan_existing {
@@ -312,14 +348,6 @@ fn handle_batch_downloads(config: &AppConfig, downloads: Vec<ReadyDownload>) -> 
         BatchChoice::MoveAllTo(target) => {
             move_batch_and_remember(config, &downloads, &domain, &target)
         }
-        BatchChoice::OneByOne => {
-            for download in downloads {
-                if let Err(error) = handle_single_download(config, download) {
-                    log(&format!("逐个处理失败: {error:#}"));
-                }
-            }
-            Ok(())
-        }
     }
 }
 
@@ -338,14 +366,14 @@ fn move_batch_and_remember(
 }
 
 fn next_timeout(
-    pending: &HashMap<PathBuf, Instant>,
+    pending: &HashMap<PathBuf, PendingEntry>,
     queues: &HashMap<String, DomainQueue>,
 ) -> Option<Duration> {
     let now = Instant::now();
     let pending_timeout = pending
         .values()
-        .min()
-        .map(|deadline| deadline.saturating_duration_since(now));
+        .map(|entry| entry.due.saturating_duration_since(now))
+        .min();
     let queue_timeout = queues
         .values()
         .map(|queue| queue.deadline.saturating_duration_since(now))

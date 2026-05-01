@@ -1,22 +1,16 @@
 use crate::pathing::{home_dir, log};
 use anyhow::{anyhow, Context, Result};
 use std::env;
-use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const LABEL: &str = "com.yy.download-cleaner";
-const AUTO_INSTALL_ENV: &str = "DOWNLOAD_CLEANER_AUTO_INSTALL_LAUNCHD";
 
 pub fn maybe_install_launch_agent() -> Result<()> {
-    if env::var_os(AUTO_INSTALL_ENV).as_deref() != Some(OsStr::new("1")) {
-        return Ok(());
-    }
-
     let daemon_binary = env::current_exe().context("无法读取当前可执行文件路径")?;
-    let (plist_path, existed_before, needs_write) = ensure_launch_agent_plist(&daemon_binary)?;
+    let (plist_path, _existed_before, needs_write) = ensure_launch_agent_plist(&daemon_binary)?;
     let uid = current_uid()?;
     let domain = format!("gui/{uid}");
     let service = format!("{domain}/{LABEL}");
@@ -24,10 +18,9 @@ pub fn maybe_install_launch_agent() -> Result<()> {
 
     if loaded && needs_write {
         let _ = launchctl_status(&["bootout", &service]);
-        let plist_path_string = plist_path.to_string_lossy().into_owned();
-        run_launchctl(&["bootstrap", &domain, &plist_path_string])?;
-        run_launchctl(&["kickstart", "-k", &service])?;
-    } else if !loaded && !existed_before {
+    }
+
+    if needs_write || !loaded {
         let plist_path_string = plist_path.to_string_lossy().into_owned();
         run_launchctl(&["bootstrap", &domain, &plist_path_string])?;
         run_launchctl(&["kickstart", "-k", &service])?;

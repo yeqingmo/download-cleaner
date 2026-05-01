@@ -70,7 +70,7 @@ cargo run -- panel-slint
 DOWNLOADS_DIR="$HOME/Downloads"
 MEMORY_PATH="$HOME/.config/smart_dl_memory.json"
 COMPLETE_DELAY_MS=500
-BATCH_WINDOW_MS=10000
+BATCH_WINDOW_MS=1500
 SCAN_EXISTING=1
 ```
 

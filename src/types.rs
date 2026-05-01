@@ -40,5 +40,4 @@ pub enum BatchChoice {
     IgnoreAll,
     MoveAllTo(PathBuf),
     ChooseOtherAll,
-    OneByOne,
 }

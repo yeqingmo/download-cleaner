@@ -21,7 +21,7 @@ impl AppConfig {
         let batch_window_ms = env::var("BATCH_WINDOW_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(10_000);
+            .unwrap_or(1_500);
 
         Ok(Self {
             downloads_dir: expand_home(downloads_dir)?,

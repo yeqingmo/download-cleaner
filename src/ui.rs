@@ -67,54 +67,50 @@ pub fn prompt_batch_user(
         .join("、");
     let title = format!("检测到同源下载: {domain}（{count} 个）");
 
-    if let Some((target, _)) = suggestion {
-        let target_name = folder_name(target);
-        let move_button = format!("全部移到 {target_name}");
-        let body = format!(
-            "来源: {domain}。共 {count} 个文件：{sample}{}。建议统一移至 {target_name}。",
-            if count > 3 { " 等" } else { "" }
-        );
-        let script = format!(
+    let body = format!(
+        "来源: {domain}。共 {count} 个文件：{sample}{}。{}",
+        if count > 3 { " 等" } else { "" },
+        if let Some((target, _)) = suggestion {
+            format!("建议统一移至 {}。", folder_name(target))
+        } else {
+            "当前没有历史建议。".to_string()
+        }
+    );
+
+    let script = if let Some((target, _)) = suggestion {
+        let move_button = format!("全部移到 {}", folder_name(target));
+        format!(
             r#"use scripting additions
-set resultButton to button returned of (display dialog "{}" with title "{}" buttons {{"放着不管", "逐个处理", "选择其他...", "{}"}} default button "{}" with icon note)
+set resultButton to button returned of (display dialog "{}" with title "{}" buttons {{"放着不管", "选择其他...", "{}"}} default button "{}" with icon note)
 return resultButton"#,
             escape_applescript(&body),
             escape_applescript(&title),
             escape_applescript(&move_button),
             escape_applescript(&move_button),
-        );
-        let answer = run_osascript(&script)?;
+        )
+    } else {
+        format!(
+            r#"use scripting additions
+set resultButton to button returned of (display dialog "{}" with title "{}" buttons {{"放着不管", "选择其他..."}} default button "选择其他..." with icon note)
+return resultButton"#,
+            escape_applescript(&body),
+            escape_applescript(&title),
+        )
+    };
+    let answer = run_osascript(&script)?;
 
-        if answer == "放着不管" {
-            Ok(BatchChoice::IgnoreAll)
-        } else if answer == "逐个处理" {
-            Ok(BatchChoice::OneByOne)
-        } else if answer == "选择其他..." {
-            Ok(BatchChoice::ChooseOtherAll)
-        } else {
+    if answer == "放着不管" {
+        Ok(BatchChoice::IgnoreAll)
+    } else if answer == "选择其他..." {
+        Ok(BatchChoice::ChooseOtherAll)
+    } else if let Some((target, _)) = suggestion {
+        if answer == format!("全部移到 {}", folder_name(target)) {
             Ok(BatchChoice::MoveAllTo(target.clone()))
+        } else {
+            Ok(BatchChoice::ChooseOtherAll)
         }
     } else {
-        let body = format!(
-            "来源: {domain}。共 {count} 个文件：{sample}{}。当前没有历史建议。",
-            if count > 3 { " 等" } else { "" }
-        );
-        let script = format!(
-            r#"use scripting additions
-set resultButton to button returned of (display dialog "{}" with title "{}" buttons {{"放着不管", "逐个处理", "选择其他..."}} default button "选择其他..." with icon note)
-return resultButton"#,
-            escape_applescript(&body),
-            escape_applescript(&title),
-        );
-        let answer = run_osascript(&script)?;
-
-        if answer == "放着不管" {
-            Ok(BatchChoice::IgnoreAll)
-        } else if answer == "逐个处理" {
-            Ok(BatchChoice::OneByOne)
-        } else {
-            Ok(BatchChoice::ChooseOtherAll)
-        }
+        Ok(BatchChoice::ChooseOtherAll)
     }
 }
 
