@@ -1,7 +1,7 @@
 # Download Cleaner
 
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/dedfbc8a-7372-4e8c-be03-1b1eb9da49cb" autoplay loop muted playsinline width="800"></video>
+  <img src="https://github.com/user-attachments/assets/b3e055fc-ae9e-4581-9b02-a25881eebc2d" width="800" alt="Download Cleaner 10x Demo" />
 </p>
 
 English | [中文文档](./README.zh-CN.md)
