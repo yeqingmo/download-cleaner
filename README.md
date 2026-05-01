@@ -8,7 +8,9 @@ English | [中文文档](./README.zh-CN.md)
 
 ## About
 
-Download Cleaner is a native macOS download organizer. It watches `~/Downloads`, reads source domains from new files, suggests destinations from your history, and prompts with native dialogs after downloads stabilize. It ships with a background daemon and a Slint-based panel for batch review.
+Download Cleaner is a native macOS download organizer. It watches `~/Downloads`, reads source domains from new files, and helps you move downloads into the folders you already use. After a download stabilizes, it prompts with native dialogs and remembers where files from the same source usually go.
+
+The default workflow is organization by moving, not automatic deletion. Trash actions are available from the panel for batch cleanup when you explicitly choose them, and they move files to the current user's `~/.Trash` (Finder Trash) instead of permanently deleting them.
 
 ## Features
 
@@ -17,13 +19,21 @@ Download Cleaner is a native macOS download organizer. It watches `~/Downloads`,
 - Keeps monitoring after the window closes
 - Supports stop / restart monitoring
 - Panel supports sorting, multi-select, and Shift-range selection
-- Move to suggestion, choose a folder, or trash items
+- Move to suggested folders or choose a destination manually
+- Batch trash selected items from the panel
 - Low-memory daemon
 
 ## How It Works
 
-- Daemon: watches Downloads, identifies files, and prompts to organize
-- Panel: browses files, batch-moves or deletes them, and controls monitoring
+- Daemon: watches Downloads, identifies files, and prompts you to move them into the right place
+- Panel: browses files, supports batch moving, offers explicit trash actions, and controls monitoring
+
+## Safety
+
+- New-download prompts only offer move or ignore choices
+- Trash actions are explicit panel actions for selected items
+- Trashing moves regular files to the current user's `~/.Trash` (Finder Trash); it does not permanently delete them
+- Non-regular files are rejected by the file operation layer
 
 ## Install
 
@@ -33,11 +43,18 @@ Download Cleaner is a native macOS download organizer. It watches `~/Downloads`,
 
 ## Usage
 
-- Main app: open the app normally
-- Panel: `cargo run -- panel`
-- Panel alias: `cargo run -- panel-slint`
-- AppleScript manager: `cargo run -- panel-script`
-- Summary panel: `cargo run -- panel-summary`
+- Main app: open `Download Cleaner.app` normally
+- Background monitoring keeps running after the window closes
+- Use the panel to review Downloads, batch-move selected files, trash selected files, or stop / restart monitoring
+
+Developer commands:
+
+```bash
+cargo run -- panel
+cargo run -- panel-slint
+cargo run -- panel-script
+cargo run -- panel-summary
+```
 
 ## Behavior
 
@@ -45,6 +62,8 @@ Download Cleaner is a native macOS download organizer. It watches `~/Downloads`,
 - Same-source downloads may batch together
 - Closing the panel does not stop the daemon
 - Use the panel to stop or restart monitoring
+- The organizer prefers move actions; trashing is an explicit panel action for selected items
+- Files sent to Trash can be reviewed or restored from Finder Trash
 
 ## Configuration
 
@@ -86,7 +105,7 @@ rm ~/Library/LaunchAgents/com.yy.download-cleaner.plist
 - `src/daemon.rs`: watcher and batching
 - `src/ui.rs`: native dialogs
 - `src/gui_panel_slint.rs`: panel UI
-- `src/file_ops.rs`: move/delete/stability checks
+- `src/file_ops.rs`: move/trash/stability checks
 - `src/metadata.rs`: source domain extraction
 - `src/memory.rs`: preference memory
 - `src/config.rs`: env config
